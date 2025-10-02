@@ -17,10 +17,10 @@ app.use('/uploads', express.static('public/uploads'));
 
 // Database connection - Neon
 const pool = new Pool({
-  user: 'neondb_owner',
-  host: 'ep-muddy-lab-ae611p24-pooler.c-2.us-east-2.aws.neon.tech',
-  database: 'neondb',
-  password: 'npg_lCxdD43FsNMv',
+  user: 'gen_user',
+  host: 'c98956375b5e3a754597fbcd.twc1.net',
+  database: 'map',
+  password: 'Y7_TvHl,5gd8eE',
   port: 5432,
   ssl: {
     rejectUnauthorized: false
@@ -35,7 +35,7 @@ pool.connect((err, client, release) => {
   if (err) {
     console.error('Error connecting to database:', err.stack);
   } else {
-    console.log('Connected to Neon database successfully');
+    console.log('Connected to Timeweb database successfully');
     release();
   }
 });
