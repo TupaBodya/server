@@ -1,12 +1,16 @@
 {
   "name": "server",
   "version": "1.0.0",
-  "description": "",
+  "description": "University Map and Schedule API",
   "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "build": "npm install",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "heroku-postbuild": "npm install && if [ -d \"client\" ]; then cd client && npm install && npm run build; fi"
   },
-  "keywords": [],
+  "keywords": ["university", "map", "schedule", "api"],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -21,5 +25,12 @@
     "path": "^0.12.7",
     "pg": "^8.16.3",
     "router": "^2.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
   }
 }

@@ -5,7 +5,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 const multer = require('multer');
 const fs = require('fs');
 
@@ -14,13 +14,30 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 app.use('/uploads', express.static('public/uploads'));
-// Database connection
+
+// Database connection - Neon
 const pool = new Pool({
-  user: 'postgres',
-  host: 'localhost',
-  database: 'map1',
-  password: '7632',
+  user: 'neondb_owner',
+  host: 'ep-muddy-lab-ae611p24-pooler.c-2.us-east-2.aws.neon.tech',
+  database: 'neondb',
+  password: 'npg_lCxdD43FsNMv',
   port: 5432,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
+
+// Test database connection
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Error connecting to database:', err.stack);
+  } else {
+    console.log('Connected to Neon database successfully');
+    release();
+  }
 });
 
 const storage = multer.diskStorage({
@@ -55,7 +72,7 @@ const upload = multer({
 });
 
 // JWT Secret
-const JWT_SECRET = 'your-secret-key-here';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
 
 // Auth middleware
 const authenticate = (req, res, next) => {
@@ -1380,8 +1397,35 @@ app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
   }
 });
 
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ 
+      status: 'OK', 
+      database: 'Connected',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      status: 'Error', 
+      database: 'Disconnected',
+      error: err.message 
+    });
+  }
+});
+
+// Serve React app in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'client/build')));
+  
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+  });
+}
 
 // Start server
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
