@@ -1,0 +1,1387 @@
+const express = require('express');
+const { Pool } = require('pg');
+const path = require('path');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const app = express();
+const port = 3001;
+const multer = require('multer');
+const fs = require('fs');
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+app.use('/uploads', express.static('public/uploads'));
+// Database connection
+const pool = new Pool({
+  user: 'postgres',
+  host: 'localhost',
+  database: 'map1',
+  password: '7632',
+  port: 5432,
+});
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = 'public/uploads/avatars';
+    // Создаем директорию если не существует
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Генерируем уникальное имя файла
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'avatar-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: function (req, file, cb) {
+    // Проверяем что файл является изображением
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
+
+// JWT Secret
+const JWT_SECRET = 'your-secret-key-here';
+
+// Auth middleware
+const authenticate = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const isAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+};
+
+// Utility functions
+const formatDate = (date) => new Date(date).toISOString();
+
+// API Routes
+
+// ==================== Auth Routes ====================
+app.post('/api/auth/register', async (req, res) => {
+  const { username, email, password, group } = req.body;
+  
+  try {
+    // Check if user exists
+    const userExists = await pool.query(
+      'SELECT * FROM users WHERE username = $1 OR email = $2', 
+      [username, email]
+    );
+    
+    if (userExists.rows.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Create user
+    const { rows: [user] } = await pool.query(
+      `INSERT INTO users (username, email, password_hash, role) 
+       VALUES ($1, $2, $3, 'user') RETURNING *`,
+      [username, email, hashedPassword]
+    );
+
+    // Create profile - исправлено имя поля
+    await pool.query(
+      'INSERT INTO profiles (user_id, group_name) VALUES ($1, $2)',
+      [user.id, group] // Исправлено: было group_name
+    );
+
+    // Generate token
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
+
+    res.json({ 
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        group // Исправлено: было group_name
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// Пример для Express.js
+app.get('/api/buffet-menu', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM buffet_menu 
+      WHERE is_available = true 
+      ORDER BY category, name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching buffet menu:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  
+  try {
+    // Find user
+    const { rows: [user] } = await pool.query(
+      'SELECT * FROM users WHERE username = $1', 
+      [username]
+    );
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Get profile
+    const { rows: [profile] } = await pool.query(
+      'SELECT * FROM profiles WHERE user_id = $1', 
+      [user.id]
+    );
+
+    // Generate token
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
+
+    res.json({ 
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        avatar: profile?.avatar_url,
+        group: profile?.group_name
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// ==================== Admin Routes ====================
+
+// -------------------- Users CRUD --------------------
+app.get('/api/admin/users', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, email, role, created_at, updated_at FROM users'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/users/:id/role', authenticate, isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+
+  try {
+    if (!['admin', 'user'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE users 
+       SET role = $1, updated_at = NOW() 
+       WHERE id = $2 
+       RETURNING id, username, email, role, created_at, updated_at`,
+      [role, id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/users/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'DELETE FROM users WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// -------------------- Teachers CRUD --------------------
+app.get('/api/admin/teachers', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM teachers');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/teachers', authenticate, isAdmin, async (req, res) => {
+  const { name, surname, patronymic, post } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO teachers (name, surname, patronymic, post) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, surname, patronymic, post]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/teachers/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM teachers WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/teachers/:id', authenticate, isAdmin, async (req, res) => {
+  const { name, surname, patronymic, post } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE teachers 
+       SET name = $1, surname = $2, patronymic = $3, post = $4 
+       WHERE id = $5 RETURNING *`,
+      [name, surname, patronymic, post, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/teachers/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM teachers WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// -------------------- Groups CRUD --------------------
+app.get('/api/admin/groups', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM groups');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/groups', authenticate, isAdmin, async (req, res) => {
+  const { name_group } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO groups (name_group) VALUES ($1) RETURNING *',
+      [name_group]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/groups/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM groups WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/groups/:id', authenticate, isAdmin, async (req, res) => {
+  const { name_group } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE groups SET name_group = $1 WHERE id = $2 RETURNING *`,
+      [name_group, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/groups/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM groups WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// -------------------- Audiences CRUD --------------------
+app.get('/api/admin/audiences', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM audiences');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/audiences', authenticate, isAdmin, async (req, res) => {
+  const { num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type } = req.body;
+  
+  try {
+    // Проверяем, существует ли уже аудитория с таким номером в этом корпусе
+    const existing = await pool.query(
+      'SELECT * FROM audiences WHERE num_audiences = $1 AND corpus = $2',
+      [num_audiences, corpus]
+    );
+    
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Аудитория с таким номером уже существует в этом корпусе' });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO audiences (num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+
+app.get('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM audiences WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Audience not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// В PUT /api/admin/audiences/:id
+app.put('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
+  const { num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type } = req.body;
+  
+  try {
+    // Проверка на существование дубликата
+    const existing = await pool.query(
+      'SELECT * FROM audiences WHERE num_audiences = $1 AND corpus = $2 AND id != $3',
+      [num_audiences, corpus, req.params.id]
+    );
+    
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ 
+        error: 'Аудитория с таким номером уже существует в этом корпусе',
+        details: existing.rows[0]
+      });
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE audiences 
+       SET num_audiences = $1, corpus = $2, image1 = $3, image2 = $4, image3 = $5, 
+           floor = $6, x = $7, y = $8, width = $9, height = $10, 
+           description = $11, audience_type = $12
+       WHERE id = $13 RETURNING *`,
+      [num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, 
+       description, audience_type, req.params.id]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Аудитория не найдена' });
+    }
+    
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Ошибка при обновлении аудитории:', err);
+    res.status(500).json({ 
+      error: 'Ошибка базы данных',
+      details: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+  }
+});
+
+app.delete('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'DELETE FROM audiences WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'Audience not found' });
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// -------------------- Lessons CRUD --------------------
+app.get('/api/admin/lessons', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM lessons');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/lessons', authenticate, isAdmin, async (req, res) => {
+  const { name_lesson } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO lessons (name_lesson) VALUES ($1) RETURNING *',
+      [name_lesson]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/lessons/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM lessons WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Lesson not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/lessons/:id', authenticate, isAdmin, async (req, res) => {
+  const { name_lesson } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE lessons SET name_lesson = $1 WHERE id = $2 RETURNING *`,
+      [name_lesson, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/lessons/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM lessons WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// -------------------- Schedule CRUD --------------------
+app.get('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT s.*, l.name_lesson, t.name, t.surname, g.name_group, a.num_audiences
+      FROM schedule s
+      LEFT JOIN lessons l ON s.lesson_id = l.id
+      LEFT JOIN teachers t ON s.teacher_id = t.id
+      LEFT JOIN groups g ON s.group_id = g.id
+      LEFT JOIN audiences a ON s.audience_id = a.id
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
+  const { lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO schedule (lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/schedule/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT s.*, l.name_lesson, t.name, t.surname, g.name_group, a.num_audiences
+      FROM schedule s
+      LEFT JOIN lessons l ON s.lesson_id = l.id
+      LEFT JOIN teachers t ON s.teacher_id = t.id
+      LEFT JOIN groups g ON s.group_id = g.id
+      LEFT JOIN audiences a ON s.audience_id = a.id
+      WHERE s.id = $1
+    `, [req.params.id]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/schedule/:id', authenticate, isAdmin, async (req, res) => {
+  const { lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE schedule 
+       SET lesson_id = $1, teacher_id = $2, group_id = $3, audience_id = $4, 
+           time_start = $5, time_over = $6, day_week = $7
+       WHERE id = $8 RETURNING *`,
+      [lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/schedule/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM schedule WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== Public Routes ====================
+// Получение списка групп (публичный)
+app.get('/api/groups', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM groups');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение списка преподавателей (публичный)
+app.get('/api/teachers', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM teachers');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение аудиторий (публичный)
+app.get('/api/audiences', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM audiences');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение предметов (публичный)
+app.get('/api/lessons', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM lessons');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение расписания для аудитории (публичный)
+app.get('/api/schedule/:audienceId', async (req, res) => {
+  const { audienceId } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT s.*, l.name_lesson, t.name, t.surname, t.patronymic, g.name_group 
+      FROM schedule s
+      JOIN lessons l ON s.lesson_id = l.id
+      JOIN teachers t ON s.teacher_id = t.id
+      JOIN groups g ON s.group_id = g.id
+      WHERE s.audience_id = $1
+    `, [audienceId]);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+app.get('/api/audiences', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM audiences');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/schedule/group/:groupName', async (req, res) => {
+  const { groupName } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT s.audience_id
+      FROM schedule s
+      JOIN groups g ON s.group_id = g.id
+      WHERE g.name_group ILIKE $1
+    `, [`%${groupName}%`]);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/schedule/teacher/:teacherName', async (req, res) => {
+  const { teacherName } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT s.audience_id
+      FROM schedule s
+      JOIN teachers t ON s.teacher_id = t.id
+      WHERE CONCAT(t.surname, ' ', t.name, ' ', t.patronymic) ILIKE $1
+    `, [`%${teacherName}%`]);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== Territory Routes ====================
+
+// Получение всех зданий
+app.get('/api/territory/buildings', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM buildings ORDER BY name');
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка загрузки зданий:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение всех памятников
+app.get('/api/territory/landmarks', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM landmarks ORDER BY name');
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка загрузки памятников:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение расписания спортивного объекта
+app.get('/api/sport-schedule/:buildingId', async (req, res) => {
+  try {
+    const { buildingId } = req.params;
+    const { rows } = await pool.query(
+      'SELECT * FROM sport_schedule WHERE building_id = $1 ORDER BY day_week, time_start',
+      [buildingId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка загрузки расписания:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Поиск зданий
+app.get('/api/territory/buildings/search', async (req, res) => {
+  try {
+    const { query } = req.query;
+    const { rows } = await pool.query(
+      `SELECT * FROM buildings 
+       WHERE name ILIKE $1 OR description ILIKE $1 
+       ORDER BY name`,
+      [`%${query}%`]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка поиска зданий:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Поиск памятников
+app.get('/api/territory/landmarks/search', async (req, res) => {
+  try {
+    const { query } = req.query;
+    const { rows } = await pool.query(
+      `SELECT * FROM landmarks 
+       WHERE name ILIKE $1 OR description ILIKE $1 
+       ORDER BY name`,
+      [`%${query}%`]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка поиска памятников:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== Admin Routes for Territory ====================
+
+// CRUD для зданий
+app.get('/api/admin/buildings', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM buildings ORDER BY name');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/buildings', authenticate, isAdmin, async (req, res) => {
+  const { name, type, corpus, x, y, width, height, description, images } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO buildings (name, type, corpus, x, y, width, height, description, images) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [name, type, corpus, x, y, width, height, description, images]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/buildings/:id', authenticate, isAdmin, async (req, res) => {
+  const { name, type, corpus, x, y, width, height, description, images } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE buildings 
+       SET name = $1, type = $2, corpus = $3, x = $4, y = $5, width = $6, height = $7, 
+           description = $8, images = $9, updated_at = NOW()
+       WHERE id = $10 RETURNING *`,
+      [name, type, corpus, x, y, width, height, description, images, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/buildings/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM buildings WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// CRUD для памятников
+app.get('/api/admin/landmarks', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM landmarks ORDER BY name');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/landmarks', authenticate, isAdmin, async (req, res) => {
+  const { name, type, x, y, radius, description, year, images } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO landmarks (name, type, x, y, radius, description, year, images) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [name, type, x, y, radius, description, year, images]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/landmarks/:id', authenticate, isAdmin, async (req, res) => {
+  const { name, type, x, y, radius, description, year, images } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE landmarks 
+       SET name = $1, type = $2, x = $3, y = $4, radius = $5, 
+           description = $6, year = $7, images = $8, updated_at = NOW()
+       WHERE id = $9 RETURNING *`,
+      [name, type, x, y, radius, description, year, images, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/landmarks/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM landmarks WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// CRUD для спортивного расписания
+app.get('/api/admin/sport-schedule', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT ss.*, b.name as building_name 
+      FROM sport_schedule ss
+      LEFT JOIN buildings b ON ss.building_id = b.id
+      ORDER BY ss.day_week, ss.time_start
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/sport-schedule', authenticate, isAdmin, async (req, res) => {
+  const { building_id, sport_type, coach, group_name, day_week, time_start, time_over } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO sport_schedule (building_id, sport_type, coach, group_name, day_week, time_start, time_over) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [building_id, sport_type, coach, group_name, day_week, time_start, time_over]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/sport-schedule/:id', authenticate, isAdmin, async (req, res) => {
+  const { building_id, sport_type, coach, group_name, day_week, time_start, time_over } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE sport_schedule 
+       SET building_id = $1, sport_type = $2, coach = $3, group_name = $4, 
+           day_week = $5, time_start = $6, time_over = $7, updated_at = NOW()
+       WHERE id = $8 RETURNING *`,
+      [building_id, sport_type, coach, group_name, day_week, time_start, time_over, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/sport-schedule/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM sport_schedule WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== 3D Coordinates CRUD ====================
+
+app.get('/api/admin/audiences-3d', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT ac.*, a.num_audiences, a.corpus as audience_corpus, a.floor as audience_floor
+      FROM audience_3d_coordinates ac
+      JOIN audiences a ON ac.audience_id = a.id
+      ORDER BY a.corpus, a.floor, a.num_audiences
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/audiences-3d', authenticate, isAdmin, async (req, res) => {
+  const {
+    audience_id, corpus, floor, position_x, position_y, position_z,
+    rotation_x, rotation_y, rotation_z, scale_x, scale_y, scale_z, model_type
+  } = req.body;
+  
+  try {
+    const { rows } = await pool.query(`
+      INSERT INTO audience_3d_coordinates 
+      (audience_id, corpus, floor, position_x, position_y, position_z,
+       rotation_x, rotation_y, rotation_z, scale_x, scale_y, scale_z, model_type)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      RETURNING *
+    `, [
+      audience_id, corpus, floor, position_x, position_y, position_z,
+      rotation_x || 0, rotation_y || 0, rotation_z || 0,
+      scale_x || 1, scale_y || 1, scale_z || 1, model_type || 'box'
+    ]);
+    
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/audiences-3d/:id', authenticate, isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const {
+    position_x, position_y, position_z,
+    rotation_x, rotation_y, rotation_z,
+    scale_x, scale_y, scale_z, model_type
+  } = req.body;
+  
+  try {
+    const { rows } = await pool.query(`
+      UPDATE audience_3d_coordinates 
+      SET position_x = $1, position_y = $2, position_z = $3,
+          rotation_x = $4, rotation_y = $5, rotation_z = $6,
+          scale_x = $7, scale_y = $8, scale_z = $9,
+          model_type = $10, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $11
+      RETURNING *
+    `, [
+      position_x, position_y, position_z,
+      rotation_x, rotation_y, rotation_z,
+      scale_x, scale_y, scale_z, model_type, id
+    ]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '3D coordinates not found' });
+    }
+    
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.delete('/api/admin/audiences-3d/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'DELETE FROM audience_3d_coordinates WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (rowCount === 0) {
+      return res.status(404).json({ error: '3D coordinates not found' });
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Получение 3D координат аудиторий для конкретного корпуса и этажа
+app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
+  const { corpus, floor } = req.params;
+  
+  try {
+    const { rows } = await pool.query(`
+      SELECT ac.*, a.num_audiences, a.audience_type, a.description
+      FROM audience_3d_coordinates ac
+      JOIN audiences a ON ac.audience_id = a.id
+      WHERE ac.corpus = $1 AND ac.floor = $2
+      ORDER BY a.num_audiences
+    `, [corpus, floor]);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка загрузки 3D координат:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/auth/me', authenticate, async (req, res) => {
+  try {
+    const { rows: [user] } = await pool.query(
+      'SELECT id, username, email, role FROM users WHERE id = $1', 
+      [req.user.id]
+    );
+    
+    const { rows: [profile] } = await pool.query(
+      'SELECT * FROM profiles WHERE user_id = $1', 
+      [req.user.id]
+    );
+
+    res.json({
+      ...user,
+      avatar: profile?.avatar_url,
+      group: profile?.group_name
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch user data' });
+  }
+});
+
+app.put('/api/auth/me', authenticate, async (req, res) => {
+  const { username, email, group, bio } = req.body;
+  
+  try {
+    // Проверяем уникальность username и email
+    if (username !== req.user.username) {
+      const existingUser = await pool.query(
+        'SELECT id FROM users WHERE username = $1 AND id != $2',
+        [username, req.user.id]
+      );
+      if (existingUser.rows.length > 0) {
+        return res.status(400).json({ error: 'Username already taken' });
+      }
+    }
+
+    if (email !== req.user.email) {
+      const existingEmail = await pool.query(
+        'SELECT id FROM users WHERE email = $1 AND id != $2',
+        [email, req.user.id]
+      );
+      if (existingEmail.rows.length > 0) {
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+    }
+
+    // Обновляем пользователя
+    const { rows: [updatedUser] } = await pool.query(
+      `UPDATE users 
+       SET username = $1, email = $2, updated_at = NOW() 
+       WHERE id = $3 
+       RETURNING id, username, email, role, created_at, updated_at`,
+      [username, email, req.user.id]
+    );
+
+    // Обновляем профиль
+    await pool.query(
+      `UPDATE profiles 
+       SET group_name = $1, bio = $2, updated_at = NOW()
+       WHERE user_id = $3`,
+      [group, bio, req.user.id]
+    );
+
+    // Получаем обновленные данные профиля
+    const { rows: [profile] } = await pool.query(
+      'SELECT * FROM profiles WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    res.json({
+      ...updatedUser,
+      avatar: profile?.avatar_url,
+      group: profile?.group_name,
+      bio: profile?.bio
+    });
+  } catch (err) {
+    console.error('Error updating profile:', err);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Обновление пароля
+app.put('/api/auth/me/password', authenticate, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  
+  try {
+    const { rows: [user] } = await pool.query(
+      'SELECT * FROM users WHERE id = $1', 
+      [req.user.id]
+    );
+    
+    const validPassword = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Неверный текущий пароль' });
+    }
+    
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2',
+      [hashedPassword, req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка обновления пароля' });
+  }
+});
+
+app.put('/api/auth/me', authenticate, async (req, res) => {
+  const { username, email, group, bio } = req.body;
+  
+  try {
+    // Проверяем уникальность username и email
+    if (username !== req.user.username) {
+      const existingUser = await pool.query(
+        'SELECT id FROM users WHERE username = $1 AND id != $2',
+        [username, req.user.id]
+      );
+      if (existingUser.rows.length > 0) {
+        return res.status(400).json({ error: 'Username already taken' });
+      }
+    }
+
+    if (email !== req.user.email) {
+      const existingEmail = await pool.query(
+        'SELECT id FROM users WHERE email = $1 AND id != $2',
+        [email, req.user.id]
+      );
+      if (existingEmail.rows.length > 0) {
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+    }
+
+    // Обновляем пользователя
+    const { rows: [updatedUser] } = await pool.query(
+      `UPDATE users 
+       SET username = $1, email = $2, updated_at = NOW() 
+       WHERE id = $3 
+       RETURNING id, username, email, role, created_at, updated_at`,
+      [username, email, req.user.id]
+    );
+
+    // Обновляем профиль
+    await pool.query(
+      `UPDATE profiles 
+       SET group_name = $1, bio = $2, updated_at = NOW()
+       WHERE user_id = $3`,
+      [group, bio, req.user.id]
+    );
+
+    // Получаем обновленные данные профиля
+    const { rows: [profile] } = await pool.query(
+      'SELECT * FROM profiles WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    res.json({
+      ...updatedUser,
+      avatar: profile?.avatar_url,
+      group: profile?.group_name,
+      bio: profile?.bio
+    });
+  } catch (err) {
+    console.error('Error updating profile:', err);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Обновление настроек
+app.put('/api/auth/me/settings', authenticate, async (req, res) => {
+  try {
+    const settings = req.body;
+    await pool.query(
+      'UPDATE profiles SET settings = $1 WHERE user_id = $2',
+      [JSON.stringify(settings), req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка сохранения настроек' });
+  }
+});
+
+// Удаление аккаунта
+app.delete('/api/auth/me', authenticate, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM users WHERE id = $1', [req.user.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка удаления аккаунта' });
+  }
+});
+
+app.post('/api/auth/me/avatar', authenticate, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Генерируем URL для аватара
+    const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+
+    // Обновляем аватар в базе данных
+    await pool.query(
+      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
+      [avatarUrl, req.user.id]
+    );
+
+    // Если у пользователя был старый аватар, удаляем его
+    const { rows: [oldProfile] } = await pool.query(
+      'SELECT avatar_url FROM profiles WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (oldProfile.avatar_url && oldProfile.avatar_url !== '/img/default-avatar.png') {
+      const oldAvatarPath = path.join('public', oldProfile.avatar_url);
+      if (fs.existsSync(oldAvatarPath)) {
+        fs.unlinkSync(oldAvatarPath);
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      avatarUrl: avatarUrl,
+      message: 'Avatar updated successfully' 
+    });
+  } catch (err) {
+    console.error('Error uploading avatar:', err);
+    
+    // Удаляем загруженный файл в случае ошибки
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({ error: 'Failed to upload avatar' });
+  }
+});
+
+// Маршрут для удаления аватара
+app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
+  try {
+    const { rows: [profile] } = await pool.query(
+      'SELECT avatar_url FROM profiles WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    // Удаляем файл аватара если он не дефолтный
+    if (profile.avatar_url && profile.avatar_url !== '/img/default-avatar.png') {
+      const avatarPath = path.join('public', profile.avatar_url);
+      if (fs.existsSync(avatarPath)) {
+        fs.unlinkSync(avatarPath);
+      }
+    }
+
+    // Устанавливаем дефолтный аватар
+    await pool.query(
+      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
+      ['/img/default-avatar.png', req.user.id]
+    );
+
+    res.json({ 
+      success: true, 
+      message: 'Avatar removed successfully',
+      avatarUrl: '/img/default-avatar.png'
+    });
+  } catch (err) {
+    console.error('Error removing avatar:', err);
+    res.status(500).json({ error: 'Failed to remove avatar' });
+  }
+});
+
+
+// Start server
+app.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
+});
