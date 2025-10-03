@@ -1424,6 +1424,40 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
+// Получение 3D координат аудиторий для конкретного корпуса и этажа
+app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
+  const { corpus, floor } = req.params;
+  
+  try {
+    // Проверяем существование таблицы audience_3d_coordinates
+    const tableExists = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'audience_3d_coordinates'
+      )
+    `);
+    
+    if (!tableExists.rows[0].exists) {
+      return res.status(200).json([]); // Возвращаем пустой массив если таблицы нет
+    }
+
+    const { rows } = await pool.query(`
+      SELECT ac.*, a.num_audiences, a.audience_type, a.description
+      FROM audience_3d_coordinates ac
+      JOIN audiences a ON ac.audience_id = a.id
+      WHERE ac.corpus = $1 AND ac.floor = $2
+      ORDER BY a.num_audiences
+    `, [corpus, floor]);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка загрузки 3D координат:', err);
+    
+    // Если таблицы нет или другая ошибка, возвращаем пустой массив
+    res.status(200).json([]);
+  }
+});
+
 // Start server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
