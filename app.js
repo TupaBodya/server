@@ -30,7 +30,6 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000,
 });
 
-// Test database connection
 pool.connect((err, client, release) => {
   if (err) {
     console.error('Error connecting to database:', err.stack);
@@ -97,65 +96,6 @@ const isAdmin = (req, res, next) => {
 
 // Utility functions
 const formatDate = (date) => new Date(date).toISOString();
-
-async function initializeDatabase() {
-  try {
-    // Создаем таблицу активности
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS user_activity (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        activity_type VARCHAR(50) NOT NULL,
-        description TEXT NOT NULL,
-        metadata JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Создаем таблицу избранных аудиторий
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS favorite_audiences (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        audience_id INTEGER REFERENCES audiences(id) ON DELETE CASCADE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(user_id, audience_id)
-      )
-    `);
-
-    // Создаем таблицу истории поиска
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS search_history (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        search_type VARCHAR(50) NOT NULL,
-        query TEXT NOT NULL,
-        results_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Добавляем недостающие колонки в profiles
-    await pool.query(`
-      DO $$ 
-      BEGIN 
-        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bio TEXT;
-        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS settings JSONB DEFAULT '{}';
-        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;
-        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS login_count INTEGER DEFAULT 0;
-      EXCEPTION
-        WHEN duplicate_column THEN 
-          NULL;
-      END $$;
-    `);
-
-    console.log('Database tables initialized successfully');
-  } catch (err) {
-    console.error('Error initializing database tables:', err);
-  }
-}
-
-initializeDatabase();
 
 // API Routes
 
@@ -1559,7 +1499,6 @@ app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
   }
 });
 
-/ ==================== Profile Routes ====================
 
 // Получение статистики пользователя
 app.get('/api/profile/stats', authenticate, async (req, res) => {
