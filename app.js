@@ -598,15 +598,24 @@ app.get('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
-  const { lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week } = req.body;
+app.get('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO schedule (lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [lesson_id, teacher_id, group_id, audience_id, time_start, time_over, day_week]
-    );
-    res.json(rows[0]);
+    const { rows } = await pool.query(`
+      SELECT s.*, 
+             l.name_lesson, 
+             t.name, 
+             t.surname, 
+             g.name_group, 
+             a.num_audiences,
+             TO_CHAR(s.time_start, 'HH24:MI') as time_start,
+             TO_CHAR(s.time_over, 'HH24:MI') as time_over
+      FROM schedule s
+      LEFT JOIN lessons l ON s.lesson_id = l.id
+      LEFT JOIN teachers t ON s.teacher_id = t.id
+      LEFT JOIN groups g ON s.group_id = g.id
+      LEFT JOIN audiences a ON s.audience_id = a.id
+    `);
+    res.json(rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Database error' });
@@ -616,7 +625,14 @@ app.post('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
 app.get('/api/admin/schedule/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT s.*, l.name_lesson, t.name, t.surname, g.name_group, a.num_audiences
+      SELECT s.*, 
+             l.name_lesson, 
+             t.name, 
+             t.surname, 
+             g.name_group, 
+             a.num_audiences,
+             TO_CHAR(s.time_start, 'HH24:MI') as time_start,
+             TO_CHAR(s.time_over, 'HH24:MI') as time_over
       FROM schedule s
       LEFT JOIN lessons l ON s.lesson_id = l.id
       LEFT JOIN teachers t ON s.teacher_id = t.id
@@ -712,7 +728,14 @@ app.get('/api/schedule/:audienceId', async (req, res) => {
   const { audienceId } = req.params;
   try {
     const { rows } = await pool.query(`
-      SELECT s.*, l.name_lesson, t.name, t.surname, t.patronymic, g.name_group 
+      SELECT s.*, 
+             l.name_lesson, 
+             t.name, 
+             t.surname, 
+             t.patronymic, 
+             g.name_group,
+             TO_CHAR(s.time_start, 'HH24:MI') as time_start,
+             TO_CHAR(s.time_over, 'HH24:MI') as time_over
       FROM schedule s
       JOIN lessons l ON s.lesson_id = l.id
       JOIN teachers t ON s.teacher_id = t.id
@@ -725,6 +748,7 @@ app.get('/api/schedule/:audienceId', async (req, res) => {
     res.status(500).json({ error: 'Database error' });
   }
 });
+
 app.get('/api/audiences', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM audiences');
@@ -1415,7 +1439,6 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Serve React app in production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, 'client/build')));
   
@@ -1423,13 +1446,10 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
   });
 }
-
-// Получение 3D координат аудиторий для конкретного корпуса и этажа
 app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
   const { corpus, floor } = req.params;
   
   try {
-    // Проверяем существование таблицы audience_3d_coordinates
     const tableExists = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
@@ -1438,7 +1458,7 @@ app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
     `);
     
     if (!tableExists.rows[0].exists) {
-      return res.status(200).json([]); // Возвращаем пустой массив если таблицы нет
+      return res.status(200).json([]);
     }
 
     const { rows } = await pool.query(`
@@ -1452,8 +1472,6 @@ app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error('Ошибка загрузки 3D координат:', err);
-    
-    // Если таблицы нет или другая ошибка, возвращаем пустой массив
     res.status(200).json([]);
   }
 });
