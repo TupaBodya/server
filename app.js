@@ -98,6 +98,65 @@ const isAdmin = (req, res, next) => {
 // Utility functions
 const formatDate = (date) => new Date(date).toISOString();
 
+async function initializeDatabase() {
+  try {
+    // Создаем таблицу активности
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_activity (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        activity_type VARCHAR(50) NOT NULL,
+        description TEXT NOT NULL,
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Создаем таблицу избранных аудиторий
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS favorite_audiences (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        audience_id INTEGER REFERENCES audiences(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, audience_id)
+      )
+    `);
+
+    // Создаем таблицу истории поиска
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS search_history (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        search_type VARCHAR(50) NOT NULL,
+        query TEXT NOT NULL,
+        results_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Добавляем недостающие колонки в profiles
+    await pool.query(`
+      DO $$ 
+      BEGIN 
+        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bio TEXT;
+        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS settings JSONB DEFAULT '{}';
+        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;
+        ALTER TABLE profiles ADD COLUMN IF NOT EXISTS login_count INTEGER DEFAULT 0;
+      EXCEPTION
+        WHEN duplicate_column THEN 
+          NULL;
+      END $$;
+    `);
+
+    console.log('Database tables initialized successfully');
+  } catch (err) {
+    console.error('Error initializing database tables:', err);
+  }
+}
+
+initializeDatabase();
+
 // API Routes
 
 // ==================== Auth Routes ====================
@@ -115,23 +174,20 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'User already exists' });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Create user
     const { rows: [user] } = await pool.query(
       `INSERT INTO users (username, email, password_hash, role) 
        VALUES ($1, $2, $3, 'user') RETURNING *`,
       [username, email, hashedPassword]
     );
 
-    // Create profile - исправлено имя поля
     await pool.query(
-      'INSERT INTO profiles (user_id, group_name) VALUES ($1, $2)',
-      [user.id, group] // Исправлено: было group_name
+      `INSERT INTO profiles (user_id, group_name, bio, settings, last_login, login_count) 
+       VALUES ($1, $2, '', '{}', NOW(), 1)`,
+      [user.id, group]
     );
 
-    // Generate token
     const token = jwt.sign(
       { id: user.id, username: user.username, role: user.role }, 
       JWT_SECRET, 
@@ -145,7 +201,7 @@ app.post('/api/auth/register', async (req, res) => {
         username: user.username,
         email: user.email,
         role: user.role,
-        group // Исправлено: было group_name
+        group
       }
     });
   } catch (err) {
@@ -189,9 +245,13 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Get profile
     const { rows: [profile] } = await pool.query(
       'SELECT * FROM profiles WHERE user_id = $1', 
+      [user.id]
+    );
+
+    await pool.query(
+      'UPDATE profiles SET last_login = NOW(), login_count = COALESCE(login_count, 0) + 1 WHERE user_id = $1',
       [user.id]
     );
 
@@ -1318,8 +1378,9 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
 
 // Обновление настроек
 app.put('/api/auth/me/settings', authenticate, async (req, res) => {
+  const settings = req.body;
+  
   try {
-    const settings = req.body;
     await pool.query(
       'UPDATE profiles SET settings = $1 WHERE user_id = $2',
       [JSON.stringify(settings), req.user.id]
@@ -1327,8 +1388,30 @@ app.put('/api/auth/me/settings', authenticate, async (req, res) => {
     
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Ошибка сохранения настроек' });
+    console.error('Error saving settings:', err);
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+app.get('/api/auth/me/full', authenticate, async (req, res) => {
+  try {
+    const { rows: [user] } = await pool.query(
+      `SELECT u.id, u.username, u.email, u.role, u.created_at, u.updated_at,
+              p.avatar_url, p.group_name, p.bio, p.settings, p.last_login, p.login_count
+       FROM users u
+       LEFT JOIN profiles p ON u.id = p.user_id
+       WHERE u.id = $1`,
+      [req.user.id]
+    );
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json(user);
+  } catch (err) {
+    console.error('Error fetching full profile:', err);
+    res.status(500).json({ error: 'Failed to fetch profile data' });
   }
 });
 
@@ -1475,6 +1558,253 @@ app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
     res.status(200).json([]);
   }
 });
+
+/ ==================== Profile Routes ====================
+
+// Получение статистики пользователя
+app.get('/api/profile/stats', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Получаем общее количество поисков
+    const searchCount = await pool.query(
+      'SELECT COUNT(*) FROM search_history WHERE user_id = $1',
+      [userId]
+    );
+    
+    // Получаем количество поисков за неделю
+    const weekSearchCount = await pool.query(
+      'SELECT COUNT(*) FROM search_history WHERE user_id = $1 AND created_at >= NOW() - INTERVAL \'7 days\'',
+      [userId]
+    );
+    
+    // Получаем количество избранных аудиторий
+    const favoriteCount = await pool.query(
+      'SELECT COUNT(*) FROM favorite_audiences WHERE user_id = $1',
+      [userId]
+    );
+    
+    res.json({
+      totalSearches: parseInt(searchCount.rows[0].count),
+      thisWeekSearches: parseInt(weekSearchCount.rows[0].count),
+      favoriteAudiences: parseInt(favoriteCount.rows[0].count)
+    });
+  } catch (err) {
+    console.error('Error fetching profile stats:', err);
+    res.status(500).json({ error: 'Failed to fetch profile statistics' });
+  }
+});
+
+// Получение последней активности
+app.get('/api/profile/activity', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, activity_type, description, metadata, created_at 
+       FROM user_activity 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 10`,
+      [req.user.id]
+    );
+    
+    // Форматируем активность для фронтенда
+    const formattedActivity = rows.map(activity => {
+      let icon = 'fas fa-info-circle';
+      let description = activity.description;
+      
+      switch (activity.activity_type) {
+        case 'search':
+          icon = 'fas fa-search';
+          break;
+        case 'favorite':
+          icon = 'fas fa-star';
+          break;
+        case 'navigation':
+          icon = 'fas fa-map-marker-alt';
+          break;
+        case 'profile_update':
+          icon = 'fas fa-user-edit';
+          break;
+      }
+      
+      return {
+        id: activity.id,
+        icon: icon,
+        description: description,
+        time: formatRelativeTime(activity.created_at)
+      };
+    });
+    
+    res.json(formattedActivity);
+  } catch (err) {
+    console.error('Error fetching user activity:', err);
+    res.status(500).json({ error: 'Failed to fetch user activity' });
+  }
+});
+
+function formatRelativeTime(dateString) {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  if (diffMins < 1) return 'только что';
+  if (diffMins < 60) return `${diffMins} минут назад`;
+  if (diffHours < 24) return `${diffHours} часов назад`;
+  if (diffDays === 1) return 'вчера';
+  if (diffDays < 7) return `${diffDays} дней назад`;
+  
+  return date.toLocaleDateString('ru-RU');
+}
+
+// Добавление активности
+app.post('/api/profile/activity', authenticate, async (req, res) => {
+  const { activity_type, description, metadata } = req.body;
+  
+  try {
+    await pool.query(
+      'INSERT INTO user_activity (user_id, activity_type, description, metadata) VALUES ($1, $2, $3, $4)',
+      [req.user.id, activity_type, description, metadata]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error logging activity:', err);
+    // Не отправляем ошибку клиенту, так как это не критично
+    res.json({ success: false });
+  }
+});
+
+// Избранные аудитории
+app.get('/api/profile/favorites', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fa.*, a.num_audiences, a.corpus, a.floor, a.description as audience_description
+       FROM favorite_audiences fa
+       JOIN audiences a ON fa.audience_id = a.id
+       WHERE fa.user_id = $1
+       ORDER BY fa.created_at DESC`,
+      [req.user.id]
+    );
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error fetching favorites:', err);
+    res.status(500).json({ error: 'Failed to fetch favorites' });
+  }
+});
+
+app.post('/api/profile/favorites', authenticate, async (req, res) => {
+  const { audience_id } = req.body;
+  
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO favorite_audiences (user_id, audience_id) 
+       VALUES ($1, $2) 
+       ON CONFLICT (user_id, audience_id) DO NOTHING
+       RETURNING *`,
+      [req.user.id, audience_id]
+    );
+    
+    // Логируем активность
+    await pool.query(
+      'INSERT INTO user_activity (user_id, activity_type, description) VALUES ($1, $2, $3)',
+      [req.user.id, 'favorite', `Добавлена в избранное аудитория ${audience_id}`]
+    );
+    
+    res.json({ success: true, favorite: rows[0] });
+  } catch (err) {
+    console.error('Error adding favorite:', err);
+    res.status(500).json({ error: 'Failed to add favorite' });
+  }
+});
+
+app.delete('/api/profile/favorites/:audience_id', authenticate, async (req, res) => {
+  const { audience_id } = req.params;
+  
+  try {
+    await pool.query(
+      'DELETE FROM favorite_audiences WHERE user_id = $1 AND audience_id = $2',
+      [req.user.id, audience_id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing favorite:', err);
+    res.status(500).json({ error: 'Failed to remove favorite' });
+  }
+});
+
+// История поиска
+app.get('/api/profile/search-history', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, search_type, query, results_count, created_at 
+       FROM search_history 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 20`,
+      [req.user.id]
+    );
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error fetching search history:', err);
+    res.status(500).json({ error: 'Failed to fetch search history' });
+  }
+});
+
+app.post('/api/profile/search-history', authenticate, async (req, res) => {
+  const { search_type, query, results_count } = req.body;
+  
+  try {
+    await pool.query(
+      'INSERT INTO search_history (user_id, search_type, query, results_count) VALUES ($1, $2, $3, $4)',
+      [req.user.id, search_type, query, results_count || 0]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error logging search:', err);
+    // Не отправляем ошибку клиенту
+    res.json({ success: false });
+  }
+});
+
+app.delete('/api/profile/search-history/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM search_history WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error clearing search history:', err);
+    res.status(500).json({ error: 'Failed to clear search history' });
+  }
+});
+
+// Обновление последнего входа
+app.post('/api/profile/update-last-login', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE profiles 
+       SET last_login = NOW(), login_count = COALESCE(login_count, 0) + 1 
+       WHERE user_id = $1`,
+      [req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating last login:', err);
+    // Не отправляем ошибку клиенту
+    res.json({ success: false });
+  }
+});
+
 
 // Start server
 app.listen(port, () => {
