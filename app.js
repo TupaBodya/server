@@ -94,7 +94,23 @@ const isAdmin = (req, res, next) => {
   next();
 };
 
-// Utility functions
+function getSearchTypeLabel(type) {
+  const types = {
+    'audience': 'Аудитория',
+    'group': 'Группа', 
+    'teacher': 'Преподаватель'
+  };
+  return types[type] || type;
+}
+
+function formatTime(dateString) {
+  const date = new Date(dateString);
+  return date.toLocaleTimeString('ru-RU', { 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  });
+}
+
 const formatDate = (date) => new Date(date).toISOString();
 
 // API Routes
@@ -1676,11 +1692,10 @@ app.delete('/api/profile/favorites/:audience_id', authenticate, async (req, res)
   }
 });
 
-// История поиска
 app.get('/api/profile/search-history', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, search_type, query, results_count, created_at 
+      `SELECT id, search_type, query, results_count, corpus, floor, created_at 
        FROM search_history 
        WHERE user_id = $1 
        ORDER BY created_at DESC 
@@ -1688,41 +1703,107 @@ app.get('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id]
     );
     
-    res.json(rows);
+    console.log('Raw data from DB:', rows); // Отладочное сообщение
+    
+    // Форматируем данные для фронтенда
+    const formattedHistory = rows.map(item => {
+      console.log('Processing item:', item); // Отладочное сообщение
+      
+      const formattedItem = {
+        id: item.id,
+        term: item.query, // Используем query из БД
+        type: getSearchTypeLabel(item.search_type),
+        timestamp: formatTime(item.created_at),
+        resultsCount: item.results_count,
+        corpus: item.corpus,
+        floor: item.floor
+      };
+      
+      console.log('Formatted item:', formattedItem); // Отладочное сообщение
+      return formattedItem;
+    });
+    
+    console.log('Final formatted history:', formattedHistory); // Отладочное сообщение
+    
+    res.json(formattedHistory);
   } catch (err) {
     console.error('Error fetching search history:', err);
     res.status(500).json({ error: 'Failed to fetch search history' });
   }
 });
 
+// Логирование поискового запроса
 app.post('/api/profile/search-history', authenticate, async (req, res) => {
-  const { search_type, query, results_count } = req.body;
+  const { search_type, query, results_count, corpus, floor } = req.body;
+  
+  console.log('Saving search history:', { search_type, query, results_count, corpus, floor }); // Отладочное сообщение
   
   try {
-    await pool.query(
-      'INSERT INTO search_history (user_id, search_type, query, results_count) VALUES ($1, $2, $3, $4)',
-      [req.user.id, search_type, query, results_count || 0]
+    const result = await pool.query(
+      `INSERT INTO search_history (user_id, search_type, query, results_count, corpus, floor) 
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING *`,
+      [req.user.id, search_type, query, results_count || 0, corpus, floor]
     );
     
-    res.json({ success: true });
+    console.log('Saved search history:', result.rows[0]); // Отладочное сообщение
+    
+    res.json({ success: true, savedItem: result.rows[0] });
   } catch (err) {
     console.error('Error logging search:', err);
-    // Не отправляем ошибку клиенту
-    res.json({ success: false });
+    res.status(500).json({ error: 'Failed to log search' });
   }
 });
 
+// Удаление записи истории поиска
 app.delete('/api/profile/search-history/:id', authenticate, async (req, res) => {
   try {
-    await pool.query(
+    const { rowCount } = await pool.query(
       'DELETE FROM search_history WHERE id = $1 AND user_id = $2',
       [req.params.id, req.user.id]
+    );
+    
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'Search history item not found' });
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting search history:', err);
+    res.status(500).json({ error: 'Failed to delete search history' });
+  }
+});
+
+// Очистка всей истории поиска пользователя
+app.delete('/api/profile/search-history', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM search_history WHERE user_id = $1',
+      [req.user.id]
     );
     
     res.json({ success: true });
   } catch (err) {
     console.error('Error clearing search history:', err);
     res.status(500).json({ error: 'Failed to clear search history' });
+  }
+});
+
+app.get('/api/search/popular', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT query, search_type, COUNT(*) as search_count
+       FROM search_history 
+       WHERE created_at >= NOW() - INTERVAL '30 days'
+       GROUP BY query, search_type
+       ORDER BY search_count DESC
+       LIMIT 10`
+    );
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error fetching popular searches:', err);
+    res.status(500).json({ error: 'Failed to fetch popular searches' });
   }
 });
 
