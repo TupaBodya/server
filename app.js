@@ -1703,27 +1703,16 @@ app.get('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id]
     );
     
-    console.log('Raw data from DB:', rows); // Отладочное сообщение
-    
     // Форматируем данные для фронтенда
-    const formattedHistory = rows.map(item => {
-      console.log('Processing item:', item); // Отладочное сообщение
-      
-      const formattedItem = {
-        id: item.id,
-        term: item.query, // Используем query из БД
-        type: getSearchTypeLabel(item.search_type),
-        timestamp: formatTime(item.created_at),
-        resultsCount: item.results_count,
-        corpus: item.corpus,
-        floor: item.floor
-      };
-      
-      console.log('Formatted item:', formattedItem); // Отладочное сообщение
-      return formattedItem;
-    });
-    
-    console.log('Final formatted history:', formattedHistory); // Отладочное сообщение
+    const formattedHistory = rows.map(item => ({
+      id: item.id,
+      term: item.query,
+      type: getSearchTypeLabel(item.search_type),
+      timestamp: formatTime(item.created_at),
+      resultsCount: item.results_count,
+      corpus: item.corpus,
+      floor: item.floor
+    }));
     
     res.json(formattedHistory);
   } catch (err) {
