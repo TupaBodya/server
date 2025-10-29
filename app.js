@@ -13,62 +13,9 @@ const fs = require('fs');
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
-app.use('/uploads', express.static('public/uploads'));
-
-const pool = new Pool({
-  user: 'gen_user',
-  host: 'c98956375b5e3a754597fbcd.twc1.net',
-  database: 'map',
-  password: 'Y7_TvHl,5gd8eE',
-  port: 5432,
-  ssl: {
-    rejectUnauthorized: false
-  },
-  max: 20,
-  idleTimeoutMillis: 50000,
-  connectionTimeoutMillis: 5000,
-});
-
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Error connecting to database:', err.stack);
-  } else {
-    console.log('Connected to Timeweb database successfully');
-    release();
-  }
-});
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = 'public/uploads/avatars';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'avatar-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 5MB limit
-  },
-  fileFilter: function (req, file, cb) {
-    // Проверяем что файл является изображением
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed!'), false);
-    }
-  }
-});
 
 // JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'fe1d5e0bf02cd6da9936b8da947b98fd';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
 
 // Auth middleware
 const authenticate = (req, res, next) => {
@@ -90,6 +37,143 @@ const isAdmin = (req, res, next) => {
   }
   next();
 };
+
+// Database connection - Neon
+const pool = new Pool({
+  user: 'gen_user',
+  host: 'c98956375b5e3a754597fbcd.twc1.net',
+  database: 'map',
+  password: 'Y7_TvHl,5gd8eE',
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+  maxUses: 10000,
+});
+
+// Добавьте обработчики событий пула
+pool.on('error', (err, client) => {
+  console.error('Unexpected error on idle client', err);
+});
+
+pool.on('connect', () => {
+  console.log('Database connection established');
+});
+
+pool.on('remove', () => {
+  console.log('Database connection removed');
+});
+
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Error connecting to database:', err.stack);
+  } else {
+    console.log('Connected to Timeweb database successfully');
+    release();
+  }
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Promise Rejection:', err);
+  // Не завершайте процесс в development
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+});
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'uploads/avatars');
+    // Создаем директорию если не существует
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'avatar-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+// Обслуживаем статические файлы из папки сервера
+app.use('/uploads', express.static(path.join(__dirname, '/uploads')));
+
+const createDirectories = () => {
+  const directories = [
+    path.join(__dirname, 'uploads/avatars'),
+    path.join(__dirname, 'public/img')
+  ];
+  
+  directories.forEach(dir => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log('Created directory:', dir);
+    }
+  });
+};
+
+createDirectories();
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  },
+  fileFilter: function (req, file, cb) {
+    // Проверяем что файл является изображением
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
+
+// Маршрут для удаления аватара
+app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
+  try {
+    // Получаем текущий аватар
+    const { rows: [profile] } = await pool.query(
+      'SELECT avatar_url FROM profiles WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (profile && profile.avatar_url && profile.avatar_url !== '/img/default-avatar.png') {
+      // Удаляем файл аватара
+      const avatarPath = path.join(__dirname, 'uploads/avatars', path.basename(profile.avatar_url));
+      if (fs.existsSync(avatarPath)) {
+        fs.unlinkSync(avatarPath);
+      }
+    }
+
+    // Устанавливаем аватар по умолчанию
+    await pool.query(
+      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
+      ['/img/default-avatar.png', req.user.id]
+    );
+
+    res.json({ 
+      success: true, 
+      message: 'Аватар удален',
+      avatarUrl: '/img/default-avatar.png'
+    });
+
+  } catch (err) {
+    console.error('Error removing avatar:', err);
+    res.status(500).json({ error: 'Ошибка удаления аватара' });
+  }
+});
 
 function getSearchTypeLabel(type) {
   const types = {
@@ -1361,6 +1445,12 @@ app.get('/api/auth/me/full', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
+    console.log('Sending user data to client:', {
+      id: user.id,
+      username: user.username,
+      avatar_url: user.avatar_url
+    });
+    
     res.json(user);
   } catch (err) {
     console.error('Error fetching full profile:', err);
@@ -1381,48 +1471,77 @@ app.delete('/api/auth/me', authenticate, async (req, res) => {
 
 app.post('/api/auth/me/avatar', authenticate, upload.single('avatar'), async (req, res) => {
   try {
+    console.log('Avatar upload started...');
+    
     if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+      console.log('No file received');
+      return res.status(400).json({ error: 'Файл не загружен' });
     }
 
-    // Генерируем URL для аватара
+    console.log('File received:', req.file);
+
+    // Проверяем тип файла
+    if (!req.file.mimetype.startsWith('image/')) {
+      // Удаляем загруженный файл
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Можно загружать только изображения' });
+    }
+
+    // Генерируем относительный URL для аватара
     const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+    console.log('Generated avatar URL:', avatarUrl);
 
-    // Обновляем аватар в базе данных
-    await pool.query(
-      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
-      [avatarUrl, req.user.id]
-    );
-
-    // Если у пользователя был старый аватар, удаляем его
+    // Получаем старый аватар перед обновлением
     const { rows: [oldProfile] } = await pool.query(
       'SELECT avatar_url FROM profiles WHERE user_id = $1',
       [req.user.id]
     );
 
-    if (oldProfile.avatar_url && oldProfile.avatar_url !== '/img/default-avatar.png') {
-      const oldAvatarPath = path.join('public', oldProfile.avatar_url);
-      if (fs.existsSync(oldAvatarPath)) {
-        fs.unlinkSync(oldAvatarPath);
+    // Обновляем аватар в базе данных
+    const updateResult = await pool.query(
+      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2 RETURNING avatar_url',
+      [avatarUrl, req.user.id]
+    );
+
+    console.log('Database updated:', updateResult.rows[0]);
+
+    // Удаляем старый аватар, если он не дефолтный
+    if (oldProfile && oldProfile.avatar_url && 
+        oldProfile.avatar_url !== '/img/default-avatar.png' &&
+        oldProfile.avatar_url !== avatarUrl) {
+      try {
+        const oldAvatarPath = path.join(__dirname, 'uploads/avatars', path.basename(oldProfile.avatar_url));
+        if (fs.existsSync(oldAvatarPath)) {
+          fs.unlinkSync(oldAvatarPath);
+          console.log('Old avatar deleted:', oldAvatarPath);
+        }
+      } catch (deleteErr) {
+        console.error('Error deleting old avatar:', deleteErr);
+        // Продолжаем выполнение даже если удаление старого аватара не удалось
       }
     }
 
     res.json({ 
       success: true, 
       avatarUrl: avatarUrl,
-      message: 'Avatar updated successfully' 
+      message: 'Аватар успешно обновлен' 
     });
+
   } catch (err) {
-    console.error('Error uploading avatar:', err);
+    console.error('Error in avatar upload:', err);
     
     // Удаляем загруженный файл в случае ошибки
-    if (req.file) {
+    if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     
-    res.status(500).json({ error: 'Failed to upload avatar' });
+    res.status(500).json({ 
+      error: 'Ошибка загрузки аватара',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
+
 
 // Маршрут для удаления аватара
 app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
@@ -1434,7 +1553,7 @@ app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
 
     // Удаляем файл аватара если он не дефолтный
     if (profile.avatar_url && profile.avatar_url !== '/img/default-avatar.png') {
-      const avatarPath = path.join('public', profile.avatar_url);
+      const avatarPath = path.join(__dirname, 'uploads/avatars', path.basename(profile.avatar_url));
       if (fs.existsSync(avatarPath)) {
         fs.unlinkSync(avatarPath);
       }
@@ -1458,15 +1577,22 @@ app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
 });
 
 // Health check endpoint
+// Улучшенный health check
 app.get('/api/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1');
-    res.json({ 
-      status: 'OK', 
-      database: 'Connected',
-      timestamp: new Date().toISOString()
-    });
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT 1');
+      res.json({ 
+        status: 'OK', 
+        database: 'Connected',
+        timestamp: new Date().toISOString()
+      });
+    } finally {
+      client.release();
+    }
   } catch (err) {
+    console.error('Health check failed:', err);
     res.status(500).json({ 
       status: 'Error', 
       database: 'Disconnected',
@@ -1482,6 +1608,7 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
   });
 }
+
 app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
   const { corpus, floor } = req.params;
   
@@ -1660,12 +1787,6 @@ app.post('/api/profile/favorites', authenticate, async (req, res) => {
       [req.user.id, audience_id]
     );
     
-    // Логируем активность
-    await pool.query(
-      'INSERT INTO user_activity (user_id, activity_type, description) VALUES ($1, $2, $3)',
-      [req.user.id, 'favorite', `Добавлена в избранное аудитория ${audience_id}`]
-    );
-    
     res.json({ success: true, favorite: rows[0] });
   } catch (err) {
     console.error('Error adding favorite:', err);
@@ -1691,6 +1812,8 @@ app.delete('/api/profile/favorites/:audience_id', authenticate, async (req, res)
 
 app.get('/api/profile/search-history', authenticate, async (req, res) => {
   try {
+    console.log('Fetching search history for user:', req.user.id);
+    
     const { rows } = await pool.query(
       `SELECT id, search_type, query, results_count, corpus, floor, created_at 
        FROM search_history 
@@ -1700,40 +1823,26 @@ app.get('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id]
     );
     
-    console.log('Raw data from DB:', rows); // Отладочное сообщение
-    
-    // Форматируем данные для фронтенда
-    const formattedHistory = rows.map(item => {
-      console.log('Processing item:', item); // Отладочное сообщение
-      
-      const formattedItem = {
-        id: item.id,
-        term: item.query, // Используем query из БД
-        type: getSearchTypeLabel(item.search_type),
-        timestamp: formatTime(item.created_at),
-        resultsCount: item.results_count,
-        corpus: item.corpus,
-        floor: item.floor
-      };
-      
-      console.log('Formatted item:', formattedItem); // Отладочное сообщение
-      return formattedItem;
-    });
-    
-    console.log('Final formatted history:', formattedHistory); // Отладочное сообщение
-    
-    res.json(formattedHistory);
+    console.log('Found search history items:', rows.length);
+    res.json(rows);
   } catch (err) {
     console.error('Error fetching search history:', err);
     res.status(500).json({ error: 'Failed to fetch search history' });
   }
 });
 
-// Логирование поискового запроса
+// Сохранение истории поиска
 app.post('/api/profile/search-history', authenticate, async (req, res) => {
   const { search_type, query, results_count, corpus, floor } = req.body;
   
-  console.log('Saving search history:', { search_type, query, results_count, corpus, floor }); // Отладочное сообщение
+  console.log('Saving search history:', { 
+    user_id: req.user.id, 
+    search_type, 
+    query, 
+    results_count, 
+    corpus, 
+    floor 
+  });
   
   try {
     const result = await pool.query(
@@ -1743,16 +1852,30 @@ app.post('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id, search_type, query, results_count || 0, corpus, floor]
     );
     
-    console.log('Saved search history:', result.rows[0]); // Отладочное сообщение
-    
+    console.log('Saved search history:', result.rows[0]);
     res.json({ success: true, savedItem: result.rows[0] });
   } catch (err) {
-    console.error('Error logging search:', err);
-    res.status(500).json({ error: 'Failed to log search' });
+    console.error('Error saving search history:', err);
+    res.status(500).json({ error: 'Failed to save search history' });
   }
 });
 
-// Удаление записи истории поиска
+// Удаление всей истории поиска пользователя
+app.delete('/api/profile/search-history', authenticate, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM search_history WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error clearing search history:', err);
+    res.status(500).json({ error: 'Failed to clear search history' });
+  }
+});
+
+// Удаление конкретной записи истории поиска
 app.delete('/api/profile/search-history/:id', authenticate, async (req, res) => {
   try {
     const { rowCount } = await pool.query(
@@ -1766,23 +1889,8 @@ app.delete('/api/profile/search-history/:id', authenticate, async (req, res) => 
     
     res.json({ success: true });
   } catch (err) {
-    console.error('Error deleting search history:', err);
-    res.status(500).json({ error: 'Failed to delete search history' });
-  }
-});
-
-// Очистка всей истории поиска пользователя
-app.delete('/api/profile/search-history', authenticate, async (req, res) => {
-  try {
-    await pool.query(
-      'DELETE FROM search_history WHERE user_id = $1',
-      [req.user.id]
-    );
-    
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Error clearing search history:', err);
-    res.status(500).json({ error: 'Failed to clear search history' });
+    console.error('Error deleting search history item:', err);
+    res.status(500).json({ error: 'Failed to delete search history item' });
   }
 });
 
@@ -1821,7 +1929,6 @@ app.post('/api/profile/update-last-login', authenticate, async (req, res) => {
     res.json({ success: false });
   }
 });
-
 
 // Start server
 app.listen(port, () => {
