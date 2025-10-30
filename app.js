@@ -54,47 +54,9 @@ const pool = new Pool({
   maxUses: 10000,
 });
 
-// Добавьте обработчики событий пула
-pool.on('error', (err, client) => {
-  console.error('Unexpected error on idle client', err);
-});
-
-pool.on('connect', () => {
-  console.log('Database connection established');
-});
-
-pool.on('remove', () => {
-  console.log('Database connection removed');
-});
-
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Error connecting to database:', err.stack);
-  } else {
-    console.log('Connected to Timeweb database successfully');
-    release();
-  }
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Promise Rejection:', err);
-  // Не завершайте процесс в development
-  if (process.env.NODE_ENV === 'production') {
-    process.exit(1);
-  }
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  if (process.env.NODE_ENV === 'production') {
-    process.exit(1);
-  }
-});
-
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const uploadDir = path.join(__dirname, 'uploads/avatars');
-    // Создаем директорию если не существует
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
@@ -106,7 +68,6 @@ const storage = multer.diskStorage({
   }
 });
 
-// Обслуживаем статические файлы из папки сервера
 app.use('/uploads', express.static(path.join(__dirname, '/uploads')));
 
 const createDirectories = () => {
@@ -128,10 +89,9 @@ createDirectories();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 10 * 1024 * 1024
   },
   fileFilter: function (req, file, cb) {
-    // Проверяем что файл является изображением
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
@@ -143,21 +103,18 @@ const upload = multer({
 // Маршрут для удаления аватара
 app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
   try {
-    // Получаем текущий аватар
     const { rows: [profile] } = await pool.query(
       'SELECT avatar_url FROM profiles WHERE user_id = $1',
       [req.user.id]
     );
 
     if (profile && profile.avatar_url && profile.avatar_url !== '/img/default-avatar.png') {
-      // Удаляем файл аватара
       const avatarPath = path.join(__dirname, 'uploads/avatars', path.basename(profile.avatar_url));
       if (fs.existsSync(avatarPath)) {
         fs.unlinkSync(avatarPath);
       }
     }
 
-    // Устанавливаем аватар по умолчанию
     await pool.query(
       'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
       ['/img/default-avatar.png', req.user.id]
@@ -201,7 +158,6 @@ app.post('/api/auth/register', async (req, res) => {
   const { username, email, password, group } = req.body;
   
   try {
-    // Check if user exists
     const userExists = await pool.query(
       'SELECT * FROM users WHERE username = $1 OR email = $2', 
       [username, email]
@@ -247,7 +203,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Пример для Express.js
 app.get('/api/buffet-menu', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -266,7 +221,6 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   
   try {
-    // Find user
     const { rows: [user] } = await pool.query(
       'SELECT * FROM users WHERE username = $1', 
       [username]
@@ -276,7 +230,6 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Check password
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -292,7 +245,6 @@ app.post('/api/auth/login', async (req, res) => {
       [user.id]
     );
 
-    // Generate token
     const token = jwt.sign(
       { id: user.id, username: user.username, role: user.role }, 
       JWT_SECRET, 
@@ -518,7 +470,6 @@ app.post('/api/admin/audiences', authenticate, isAdmin, async (req, res) => {
   const { num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type } = req.body;
   
   try {
-    // Проверяем, существует ли уже аудитория с таким номером в этом корпусе
     const existing = await pool.query(
       'SELECT * FROM audiences WHERE num_audiences = $1 AND corpus = $2',
       [num_audiences, corpus]
@@ -540,7 +491,6 @@ app.post('/api/admin/audiences', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-
 app.get('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM audiences WHERE id = $1', [req.params.id]);
@@ -554,12 +504,10 @@ app.get('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// В PUT /api/admin/audiences/:id
 app.put('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
   const { num_audiences, corpus, image1, image2, image3, floor, x, y, width, height, description, audience_type } = req.body;
   
   try {
-    // Проверка на существование дубликата
     const existing = await pool.query(
       'SELECT * FROM audiences WHERE num_audiences = $1 AND corpus = $2 AND id != $3',
       [num_audiences, corpus, req.params.id]
@@ -591,8 +539,7 @@ app.put('/api/admin/audiences/:id', authenticate, isAdmin, async (req, res) => {
     console.error('Ошибка при обновлении аудитории:', err);
     res.status(500).json({ 
       error: 'Ошибка базы данных',
-      details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      details: err.message
     });
   }
 });
@@ -681,23 +628,6 @@ app.delete('/api/admin/lessons/:id', authenticate, isAdmin, async (req, res) => 
 app.get('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT s.*, l.name_lesson, t.name, t.surname, g.name_group, a.num_audiences
-      FROM schedule s
-      LEFT JOIN lessons l ON s.lesson_id = l.id
-      LEFT JOIN teachers t ON s.teacher_id = t.id
-      LEFT JOIN groups g ON s.group_id = g.id
-      LEFT JOIN audiences a ON s.audience_id = a.id
-    `);
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-app.get('/api/admin/schedule', authenticate, isAdmin, async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
       SELECT s.*, 
              l.name_lesson, 
              t.name, 
@@ -776,7 +706,6 @@ app.delete('/api/admin/schedule/:id', authenticate, isAdmin, async (req, res) =>
 });
 
 // ==================== Public Routes ====================
-// Получение списка групп (публичный)
 app.get('/api/groups', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM groups');
@@ -787,7 +716,6 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
-// Получение списка преподавателей (публичный)
 app.get('/api/teachers', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM teachers');
@@ -798,7 +726,6 @@ app.get('/api/teachers', async (req, res) => {
   }
 });
 
-// Получение аудиторий (публичный)
 app.get('/api/audiences', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM audiences');
@@ -809,7 +736,6 @@ app.get('/api/audiences', async (req, res) => {
   }
 });
 
-// Получение предметов (публичный)
 app.get('/api/lessons', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM lessons');
@@ -820,7 +746,6 @@ app.get('/api/lessons', async (req, res) => {
   }
 });
 
-// Получение расписания для аудитории (публичный)
 app.get('/api/schedule/:audienceId', async (req, res) => {
   const { audienceId } = req.params;
   try {
@@ -839,16 +764,6 @@ app.get('/api/schedule/:audienceId', async (req, res) => {
       JOIN groups g ON s.group_id = g.id
       WHERE s.audience_id = $1
     `, [audienceId]);
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-app.get('/api/audiences', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM audiences');
     res.json(rows);
   } catch (err) {
     console.error(err);
@@ -889,8 +804,6 @@ app.get('/api/schedule/teacher/:teacherName', async (req, res) => {
 });
 
 // ==================== Territory Routes ====================
-
-// Получение всех зданий
 app.get('/api/territory/buildings', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM buildings ORDER BY name');
@@ -901,7 +814,6 @@ app.get('/api/territory/buildings', async (req, res) => {
   }
 });
 
-// Получение всех памятников
 app.get('/api/territory/landmarks', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM landmarks ORDER BY name');
@@ -912,7 +824,6 @@ app.get('/api/territory/landmarks', async (req, res) => {
   }
 });
 
-// Получение расписания спортивного объекта
 app.get('/api/sport-schedule/:buildingId', async (req, res) => {
   try {
     const { buildingId } = req.params;
@@ -927,7 +838,6 @@ app.get('/api/sport-schedule/:buildingId', async (req, res) => {
   }
 });
 
-// Поиск зданий
 app.get('/api/territory/buildings/search', async (req, res) => {
   try {
     const { query } = req.query;
@@ -944,7 +854,6 @@ app.get('/api/territory/buildings/search', async (req, res) => {
   }
 });
 
-// Поиск памятников
 app.get('/api/territory/landmarks/search', async (req, res) => {
   try {
     const { query } = req.query;
@@ -962,8 +871,6 @@ app.get('/api/territory/landmarks/search', async (req, res) => {
 });
 
 // ==================== Admin Routes for Territory ====================
-
-// CRUD для зданий
 app.get('/api/admin/buildings', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM buildings ORDER BY name');
@@ -1016,7 +923,6 @@ app.delete('/api/admin/buildings/:id', authenticate, isAdmin, async (req, res) =
   }
 });
 
-// CRUD для памятников
 app.get('/api/admin/landmarks', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM landmarks ORDER BY name');
@@ -1069,7 +975,6 @@ app.delete('/api/admin/landmarks/:id', authenticate, isAdmin, async (req, res) =
   }
 });
 
-// CRUD для спортивного расписания
 app.get('/api/admin/sport-schedule', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -1128,7 +1033,6 @@ app.delete('/api/admin/sport-schedule/:id', authenticate, isAdmin, async (req, r
 });
 
 // ==================== 3D Coordinates CRUD ====================
-
 app.get('/api/admin/audiences-3d', authenticate, isAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -1222,7 +1126,6 @@ app.delete('/api/admin/audiences-3d/:id', authenticate, isAdmin, async (req, res
   }
 });
 
-// Получение 3D координат аудиторий для конкретного корпуса и этажа
 app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
   const { corpus, floor } = req.params;
   
@@ -1242,6 +1145,7 @@ app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
   }
 });
 
+// ==================== Profile Routes ====================
 app.get('/api/auth/me', authenticate, async (req, res) => {
   try {
     const { rows: [user] } = await pool.query(
@@ -1269,7 +1173,6 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
   const { username, email, group, bio } = req.body;
   
   try {
-    // Проверяем уникальность username и email
     if (username !== req.user.username) {
       const existingUser = await pool.query(
         'SELECT id FROM users WHERE username = $1 AND id != $2',
@@ -1290,7 +1193,6 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
       }
     }
 
-    // Обновляем пользователя
     const { rows: [updatedUser] } = await pool.query(
       `UPDATE users 
        SET username = $1, email = $2, updated_at = NOW() 
@@ -1299,7 +1201,6 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
       [username, email, req.user.id]
     );
 
-    // Обновляем профиль
     await pool.query(
       `UPDATE profiles 
        SET group_name = $1, bio = $2, updated_at = NOW()
@@ -1307,7 +1208,6 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
       [group, bio, req.user.id]
     );
 
-    // Получаем обновленные данные профиля
     const { rows: [profile] } = await pool.query(
       'SELECT * FROM profiles WHERE user_id = $1',
       [req.user.id]
@@ -1325,7 +1225,6 @@ app.put('/api/auth/me', authenticate, async (req, res) => {
   }
 });
 
-// Обновление пароля
 app.put('/api/auth/me/password', authenticate, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   
@@ -1353,67 +1252,6 @@ app.put('/api/auth/me/password', authenticate, async (req, res) => {
   }
 });
 
-app.put('/api/auth/me', authenticate, async (req, res) => {
-  const { username, email, group, bio } = req.body;
-  
-  try {
-    // Проверяем уникальность username и email
-    if (username !== req.user.username) {
-      const existingUser = await pool.query(
-        'SELECT id FROM users WHERE username = $1 AND id != $2',
-        [username, req.user.id]
-      );
-      if (existingUser.rows.length > 0) {
-        return res.status(400).json({ error: 'Username already taken' });
-      }
-    }
-
-    if (email !== req.user.email) {
-      const existingEmail = await pool.query(
-        'SELECT id FROM users WHERE email = $1 AND id != $2',
-        [email, req.user.id]
-      );
-      if (existingEmail.rows.length > 0) {
-        return res.status(400).json({ error: 'Email already registered' });
-      }
-    }
-
-    // Обновляем пользователя
-    const { rows: [updatedUser] } = await pool.query(
-      `UPDATE users 
-       SET username = $1, email = $2, updated_at = NOW() 
-       WHERE id = $3 
-       RETURNING id, username, email, role, created_at, updated_at`,
-      [username, email, req.user.id]
-    );
-
-    // Обновляем профиль
-    await pool.query(
-      `UPDATE profiles 
-       SET group_name = $1, bio = $2, updated_at = NOW()
-       WHERE user_id = $3`,
-      [group, bio, req.user.id]
-    );
-
-    // Получаем обновленные данные профиля
-    const { rows: [profile] } = await pool.query(
-      'SELECT * FROM profiles WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    res.json({
-      ...updatedUser,
-      avatar: profile?.avatar_url,
-      group: profile?.group_name,
-      bio: profile?.bio
-    });
-  } catch (err) {
-    console.error('Error updating profile:', err);
-    res.status(500).json({ error: 'Failed to update profile' });
-  }
-});
-
-// Обновление настроек
 app.put('/api/auth/me/settings', authenticate, async (req, res) => {
   const settings = req.body;
   
@@ -1445,12 +1283,6 @@ app.get('/api/auth/me/full', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    console.log('Sending user data to client:', {
-      id: user.id,
-      username: user.username,
-      avatar_url: user.avatar_url
-    });
-    
     res.json(user);
   } catch (err) {
     console.error('Error fetching full profile:', err);
@@ -1458,7 +1290,6 @@ app.get('/api/auth/me/full', authenticate, async (req, res) => {
   }
 });
 
-// Удаление аккаунта
 app.delete('/api/auth/me', authenticate, async (req, res) => {
   try {
     await pool.query('DELETE FROM users WHERE id = $1', [req.user.id]);
@@ -1471,41 +1302,27 @@ app.delete('/api/auth/me', authenticate, async (req, res) => {
 
 app.post('/api/auth/me/avatar', authenticate, upload.single('avatar'), async (req, res) => {
   try {
-    console.log('Avatar upload started...');
-    
     if (!req.file) {
-      console.log('No file received');
       return res.status(400).json({ error: 'Файл не загружен' });
     }
 
-    console.log('File received:', req.file);
-
-    // Проверяем тип файла
     if (!req.file.mimetype.startsWith('image/')) {
-      // Удаляем загруженный файл
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'Можно загружать только изображения' });
     }
 
-    // Генерируем относительный URL для аватара
     const avatarUrl = `/uploads/avatars/${req.file.filename}`;
-    console.log('Generated avatar URL:', avatarUrl);
 
-    // Получаем старый аватар перед обновлением
     const { rows: [oldProfile] } = await pool.query(
       'SELECT avatar_url FROM profiles WHERE user_id = $1',
       [req.user.id]
     );
 
-    // Обновляем аватар в базе данных
     const updateResult = await pool.query(
       'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2 RETURNING avatar_url',
       [avatarUrl, req.user.id]
     );
 
-    console.log('Database updated:', updateResult.rows[0]);
-
-    // Удаляем старый аватар, если он не дефолтный
     if (oldProfile && oldProfile.avatar_url && 
         oldProfile.avatar_url !== '/img/default-avatar.png' &&
         oldProfile.avatar_url !== avatarUrl) {
@@ -1513,11 +1330,9 @@ app.post('/api/auth/me/avatar', authenticate, upload.single('avatar'), async (re
         const oldAvatarPath = path.join(__dirname, 'uploads/avatars', path.basename(oldProfile.avatar_url));
         if (fs.existsSync(oldAvatarPath)) {
           fs.unlinkSync(oldAvatarPath);
-          console.log('Old avatar deleted:', oldAvatarPath);
         }
       } catch (deleteErr) {
         console.error('Error deleting old avatar:', deleteErr);
-        // Продолжаем выполнение даже если удаление старого аватара не удалось
       }
     }
 
@@ -1530,134 +1345,31 @@ app.post('/api/auth/me/avatar', authenticate, upload.single('avatar'), async (re
   } catch (err) {
     console.error('Error in avatar upload:', err);
     
-    // Удаляем загруженный файл в случае ошибки
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     
     res.status(500).json({ 
-      error: 'Ошибка загрузки аватара',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: 'Ошибка загрузки аватара'
     });
   }
 });
 
-
-// Маршрут для удаления аватара
-app.delete('/api/auth/me/avatar', authenticate, async (req, res) => {
-  try {
-    const { rows: [profile] } = await pool.query(
-      'SELECT avatar_url FROM profiles WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    // Удаляем файл аватара если он не дефолтный
-    if (profile.avatar_url && profile.avatar_url !== '/img/default-avatar.png') {
-      const avatarPath = path.join(__dirname, 'uploads/avatars', path.basename(profile.avatar_url));
-      if (fs.existsSync(avatarPath)) {
-        fs.unlinkSync(avatarPath);
-      }
-    }
-
-    // Устанавливаем дефолтный аватар
-    await pool.query(
-      'UPDATE profiles SET avatar_url = $1 WHERE user_id = $2',
-      ['/img/default-avatar.png', req.user.id]
-    );
-
-    res.json({ 
-      success: true, 
-      message: 'Avatar removed successfully',
-      avatarUrl: '/img/default-avatar.png'
-    });
-  } catch (err) {
-    console.error('Error removing avatar:', err);
-    res.status(500).json({ error: 'Failed to remove avatar' });
-  }
-});
-
-// Health check endpoint
-// Улучшенный health check
-app.get('/api/health', async (req, res) => {
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SELECT 1');
-      res.json({ 
-        status: 'OK', 
-        database: 'Connected',
-        timestamp: new Date().toISOString()
-      });
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('Health check failed:', err);
-    res.status(500).json({ 
-      status: 'Error', 
-      database: 'Disconnected',
-      error: err.message 
-    });
-  }
-});
-
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'client/build')));
-  
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
-  });
-}
-
-app.get('/api/audiences-3d/:corpus/:floor', async (req, res) => {
-  const { corpus, floor } = req.params;
-  
-  try {
-    const tableExists = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'audience_3d_coordinates'
-      )
-    `);
-    
-    if (!tableExists.rows[0].exists) {
-      return res.status(200).json([]);
-    }
-
-    const { rows } = await pool.query(`
-      SELECT ac.*, a.num_audiences, a.audience_type, a.description
-      FROM audience_3d_coordinates ac
-      JOIN audiences a ON ac.audience_id = a.id
-      WHERE ac.corpus = $1 AND ac.floor = $2
-      ORDER BY a.num_audiences
-    `, [corpus, floor]);
-    
-    res.json(rows);
-  } catch (err) {
-    console.error('Ошибка загрузки 3D координат:', err);
-    res.status(200).json([]);
-  }
-});
-
-
-// Получение статистики пользователя
+// ==================== Profile Features ====================
 app.get('/api/profile/stats', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
     
-    // Получаем общее количество поисков
     const searchCount = await pool.query(
       'SELECT COUNT(*) FROM search_history WHERE user_id = $1',
       [userId]
     );
     
-    // Получаем количество поисков за неделю
     const weekSearchCount = await pool.query(
       'SELECT COUNT(*) FROM search_history WHERE user_id = $1 AND created_at >= NOW() - INTERVAL \'7 days\'',
       [userId]
     );
     
-    // Получаем количество избранных аудиторий
     const favoriteCount = await pool.query(
       'SELECT COUNT(*) FROM favorite_audiences WHERE user_id = $1',
       [userId]
@@ -1674,7 +1386,6 @@ app.get('/api/profile/stats', authenticate, async (req, res) => {
   }
 });
 
-// Получение последней активности
 app.get('/api/profile/activity', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -1686,10 +1397,8 @@ app.get('/api/profile/activity', authenticate, async (req, res) => {
       [req.user.id]
     );
     
-    // Форматируем активность для фронтенда
     const formattedActivity = rows.map(activity => {
       let icon = 'fas fa-info-circle';
-      let description = activity.description;
       
       switch (activity.activity_type) {
         case 'search':
@@ -1709,7 +1418,7 @@ app.get('/api/profile/activity', authenticate, async (req, res) => {
       return {
         id: activity.id,
         icon: icon,
-        description: description,
+        description: activity.description,
         time: formatRelativeTime(activity.created_at)
       };
     });
@@ -1738,7 +1447,6 @@ function formatRelativeTime(dateString) {
   return date.toLocaleDateString('ru-RU');
 }
 
-// Добавление активности
 app.post('/api/profile/activity', authenticate, async (req, res) => {
   const { activity_type, description, metadata } = req.body;
   
@@ -1751,12 +1459,10 @@ app.post('/api/profile/activity', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Error logging activity:', err);
-    // Не отправляем ошибку клиенту, так как это не критично
     res.json({ success: false });
   }
 });
 
-// Избранные аудитории
 app.get('/api/profile/favorites', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -1812,8 +1518,6 @@ app.delete('/api/profile/favorites/:audience_id', authenticate, async (req, res)
 
 app.get('/api/profile/search-history', authenticate, async (req, res) => {
   try {
-    console.log('Fetching search history for user:', req.user.id);
-    
     const { rows } = await pool.query(
       `SELECT id, search_type, query, results_count, corpus, floor, created_at 
        FROM search_history 
@@ -1823,7 +1527,6 @@ app.get('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id]
     );
     
-    console.log('Found search history items:', rows.length);
     res.json(rows);
   } catch (err) {
     console.error('Error fetching search history:', err);
@@ -1831,18 +1534,8 @@ app.get('/api/profile/search-history', authenticate, async (req, res) => {
   }
 });
 
-// Сохранение истории поиска
 app.post('/api/profile/search-history', authenticate, async (req, res) => {
   const { search_type, query, results_count, corpus, floor } = req.body;
-  
-  console.log('Saving search history:', { 
-    user_id: req.user.id, 
-    search_type, 
-    query, 
-    results_count, 
-    corpus, 
-    floor 
-  });
   
   try {
     const result = await pool.query(
@@ -1852,7 +1545,6 @@ app.post('/api/profile/search-history', authenticate, async (req, res) => {
       [req.user.id, search_type, query, results_count || 0, corpus, floor]
     );
     
-    console.log('Saved search history:', result.rows[0]);
     res.json({ success: true, savedItem: result.rows[0] });
   } catch (err) {
     console.error('Error saving search history:', err);
@@ -1860,7 +1552,6 @@ app.post('/api/profile/search-history', authenticate, async (req, res) => {
   }
 });
 
-// Удаление всей истории поиска пользователя
 app.delete('/api/profile/search-history', authenticate, async (req, res) => {
   try {
     await pool.query(
@@ -1875,7 +1566,6 @@ app.delete('/api/profile/search-history', authenticate, async (req, res) => {
   }
 });
 
-// Удаление конкретной записи истории поиска
 app.delete('/api/profile/search-history/:id', authenticate, async (req, res) => {
   try {
     const { rowCount } = await pool.query(
@@ -1912,7 +1602,6 @@ app.get('/api/search/popular', async (req, res) => {
   }
 });
 
-// Обновление последнего входа
 app.post('/api/profile/update-last-login', authenticate, async (req, res) => {
   try {
     await pool.query(
@@ -1925,10 +1614,17 @@ app.post('/api/profile/update-last-login', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Error updating last login:', err);
-    // Не отправляем ошибку клиенту
     res.json({ success: false });
   }
 });
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'client/build')));
+  
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+  });
+}
 
 // Start server
 app.listen(port, () => {
