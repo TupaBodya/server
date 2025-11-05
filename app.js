@@ -1817,10 +1817,17 @@ app.get('/api/health', async (req, res) => {
 
 // ==================== Static Files ====================
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'client/build')));
+  const buildPath = path.join(__dirname, 'client/build');
+  
+  // Проверяем существование папки
+  if (!fs.existsSync(buildPath)) {
+    console.warn('⚠️  Build folder not found:', buildPath);
+  }
+  
+  app.use(express.static(buildPath));
   
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+    res.sendFile(path.join(buildPath, 'index.html'));
   });
 }
 
